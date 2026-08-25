@@ -1,9 +1,13 @@
 ﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
 Persistent
+#NoTrayIcon
 #UseHook
 CoordMode "Mouse", "Screen"
 A_MaxHotkeysPerInterval := 200
+
+; 壁纸点击转发已并入 window_opacity.py 的同一个托盘图标。
+; 启动.vbs 不再单独运行本脚本；仅在需要单独调试时手动打开。
 
 ; 最大化窗口里的点击原样留给当前窗口（~ 前缀不拦截），
 ; 同时把一份鼠标消息 Post 给 Wallpaper Engine，不激活桌面、不抢焦点。
@@ -20,22 +24,6 @@ GW_HWNDNEXT := 2
 
 g_enabled := true
 g_pressHwnd := 0
-
-A_IconTip := "壁纸点击转发（仅最大化窗口的客户区）"
-A_TrayMenu.Delete()
-A_TrayMenu.Add("启用转发", ToggleEnabled)
-A_TrayMenu.Check("启用转发")
-A_TrayMenu.Add()
-A_TrayMenu.Add("退出", (*) => ExitApp())
-
-ToggleEnabled(*) {
-    global g_enabled
-    g_enabled := !g_enabled
-    if g_enabled
-        A_TrayMenu.Check("启用转发")
-    else
-        A_TrayMenu.Uncheck("启用转发")
-}
 
 ~LButton:: {
     global g_enabled, g_pressHwnd

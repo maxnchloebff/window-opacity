@@ -1,11 +1,8 @@
 # 窗口透明度 / 最大化透视桌面
 
-Windows 后台小工具，用来「透过最大化窗口看壁纸」，并和 Wallpaper Engine 互动。
+Windows 后台小工具：透过最大化窗口看壁纸，并用 Alt+滚轮调节窗口透明度。和 Wallpaper Engine 互动时，最大化窗口里的点击会同时转发给壁纸。
 
-包含两部分：
-
-1. **窗口透明度**（`window_opacity.py`）：Alt+滚轮调节当前窗口不透明度；某窗口最大化时，按屏幕把同屏其它窗口最小化，并把最大化窗口调成半透明。
-2. **壁纸点击转发**（`wallpaper_click_passthrough.ahk`）：窗口最大化时，客户区里的左键点击仍作用于当前窗口，同时复制一份给 Wallpaper Engine，不抢焦点、不点桌面图标。
+全部功能都在 **一个托盘图标**里：`window_opacity.py`。
 
 ## 功能
 
@@ -27,30 +24,26 @@ Windows 后台小工具，用来「透过最大化窗口看壁纸」，并和 Wa
 ### 壁纸点击转发（Wallpaper Engine）
 
 - 仅当**鼠标下的窗口已最大化**，并且点在**内容区**（不是标题栏、关闭按钮、边框）时才会转发。
-- 当前窗口照常收到点击；脚本只向 Wallpaper Engine 的壁纸窗口 `PostMessage`，不会激活桌面。
+- 当前窗口照常收到点击；程序只向 Wallpaper Engine 的壁纸窗口 `PostMessage`，不会激活桌面。
 - 请在 Wallpaper Engine 中打开该壁纸的鼠标交互。
-- 托盘图标「壁纸点击转发」可取消勾选「启用转发」临时关闭。
+- 托盘菜单可取消勾选「壁纸点击转发」临时关闭。
 
 ## 用法
 
-双击 `启动.vbs`（会同时启动透明度和点击转发），或分别运行：
+双击 `启动.vbs`，或：
 
 ```powershell
 python window_opacity.py
 ```
 
-```text
-C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe wallpaper_click_passthrough.ahk
-```
+任务栏右下角会出现一个托盘图标（提示「窗口透明度：Alt+滚轮 / 透视桌面 / 壁纸点击」），右键菜单：
 
-任务栏右下角会出现两个托盘图标：
+- 最大化透视桌面
+- 壁纸点击转发
+- 以管理员身份运行
+- 退出
 
-| 图标提示 | 右键菜单 |
-| --- | --- |
-| 窗口透明度：Alt+滚轮调节 | 最大化透视桌面、以管理员身份运行、退出 |
-| 壁纸点击转发 | 启用转发、退出 |
-
-调试透明度工具（保留控制台、写更详细日志）：
+调试（保留控制台、写更详细日志）：
 
 ```powershell
 python window_opacity.py --debug
@@ -61,11 +54,10 @@ python window_opacity.py --debug
 ## 依赖
 
 - **Python 3.8+**，只用标准库，不必 `pip install`。
-- **AutoHotkey v2**（点击转发需要）。已安装到默认路径时，`启动.vbs` 会自动拉起脚本。
 
 ## 配置
 
-编辑同目录下的 `config.json`（改完后请退出再重新启动透明度工具）：
+编辑同目录下的 `config.json`（改完后请退出再重新启动）：
 
 | 项 | 含义 | 默认 |
 | --- | --- | --- |
@@ -73,6 +65,7 @@ python window_opacity.py --debug
 | `min_opacity_percent` | 滚轮能调到的最低不透明度 | `15` |
 | `maximize_peek_opacity_percent` | 最大化时的不透明度 | `85` |
 | `maximize_peek_enabled` | 是否启用最大化透视 | `true` |
+| `wallpaper_click_enabled` | 是否启用壁纸点击转发 | `true` |
 | `scan_interval_ms` | 扫描窗口状态的间隔 | `200` |
 | `debug` | 写更详细日志 | `false` |
 | `exclude_class_names` | 忽略的窗口类名 | `[]` |
@@ -87,7 +80,7 @@ powershell -ExecutionPolicy Bypass -File .\安装开机启动.ps1
 powershell -ExecutionPolicy Bypass -File .\卸载开机启动.ps1
 ```
 
-开始菜单和开机启动都指向 `启动.vbs`，因此会一并启动透明度工具和壁纸点击转发。
+开始菜单和开机启动都指向 `启动.vbs`。
 
 ## 限制与已知问题
 

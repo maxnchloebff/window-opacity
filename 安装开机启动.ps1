@@ -8,5 +8,9 @@ $lnk.TargetPath = $vbs
 $lnk.WorkingDirectory = $dir
 $lnk.WindowStyle = 7
 $lnk.Description = 'Alt+滚轮调节窗口透明度，最大化时透视桌面'
+$ico = Join-Path $dir 'icons\window-opacity.ico'
+if (Test-Path -LiteralPath $ico) {
+    $lnk.IconLocation = $ico
+}
 $lnk.Save()
 Write-Host "已添加到开机启动: $lnkPath"

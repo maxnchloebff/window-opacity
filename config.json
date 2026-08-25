@@ -3,6 +3,7 @@
   "min_opacity_percent": 15,
   "maximize_peek_opacity_percent": 85,
   "maximize_peek_enabled": true,
+  "wallpaper_click_enabled": true,
   "scan_interval_ms": 200,
   "debug": false,
   "exclude_class_names": [],

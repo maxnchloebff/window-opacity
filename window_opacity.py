@@ -50,7 +50,10 @@ WM_TIMER = 0x0113
 WM_PAINT = 0x000F
 WM_DISPLAYCHANGE = 0x007E
 WM_RBUTTONUP = 0x0205
+WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
+WM_MOUSEMOVE = 0x0200
+WM_NCHITTEST = 0x0084
 WM_APP = 0x8000
 WM_TRAY = WM_APP + 1
 WM_NULL = 0x0000
@@ -131,6 +134,13 @@ IDI_APPLICATION = 32512
 IMAGE_ICON = 1
 LR_DEFAULTSIZE = 0x00000040
 LR_SHARED = 0x00008000
+LR_LOADFROMFILE = 0x00000010
+SM_CXSMICON = 49
+HTCLIENT = 1
+MK_LBUTTON = 0x0001
+SMTO_ABORTIFHUNG = 0x0002
+GW_CHILD = 5
+GW_HWNDNEXT = 2
 
 CS_HREDRAW = 0x0002
 CS_VREDRAW = 0x0001
@@ -143,6 +153,7 @@ ERROR_ACCESS_DENIED = 5
 
 ID_TOGGLE_PEEK = 1001
 ID_RESTART_ADMIN = 1003
+ID_TOGGLE_WALLPAPER_CLICK = 1004
 ID_EXIT = 1002
 TIMER_SCAN = 1
 TIMER_OSD = 2
@@ -352,6 +363,30 @@ user32.IsWindow.restype = BOOL
 user32.IsWindowVisible.restype = BOOL
 user32.LoadIconW.restype = HICON
 user32.LoadIconW.argtypes = [HINSTANCE, wintypes.LPCWSTR]
+user32.LoadImageW.restype = HICON
+user32.LoadImageW.argtypes = [HINSTANCE, wintypes.LPCWSTR, UINT, ctypes.c_int, ctypes.c_int, UINT]
+user32.DestroyIcon.argtypes = [HICON]
+user32.DestroyIcon.restype = BOOL
+user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+user32.GetSystemMetrics.restype = ctypes.c_int
+user32.WindowFromPoint.restype = HWND
+user32.WindowFromPoint.argtypes = [POINT]
+user32.FindWindowW.restype = HWND
+user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+user32.GetWindow.restype = HWND
+user32.GetWindow.argtypes = [HWND, UINT]
+user32.ScreenToClient.restype = BOOL
+user32.ScreenToClient.argtypes = [HWND, POINTER(POINT)]
+user32.SendMessageTimeoutW.restype = ctypes.c_size_t
+user32.SendMessageTimeoutW.argtypes = [
+    HWND,
+    UINT,
+    WPARAM,
+    LPARAM,
+    UINT,
+    UINT,
+    POINTER(ctypes.c_size_t),
+]
 user32.LoadCursorW.restype = wintypes.HANDLE
 user32.LoadCursorW.argtypes = [HINSTANCE, wintypes.LPCWSTR]
 user32.SetWinEventHook.restype = wintypes.HANDLE
@@ -396,6 +431,7 @@ OBJID_WINDOW = 0
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 LOG_PATH = os.path.join(os.environ.get("TEMP", SCRIPT_DIR), "window-opacity.log")
+ICON_PATH = os.path.join(SCRIPT_DIR, "icons", "window-opacity.ico")
 
 
 def _load_config() -> dict:
@@ -404,6 +440,7 @@ def _load_config() -> dict:
         "min_opacity_percent": 15,
         "maximize_peek_opacity_percent": 85,
         "maximize_peek_enabled": True,
+        "wallpaper_click_enabled": True,
         "scan_interval_ms": 200,
         "debug": False,
         "exclude_class_names": [],
@@ -421,6 +458,40 @@ def _load_config() -> dict:
 
 
 CFG = _load_config()
+
+
+def load_app_icon() -> Tuple[int, bool]:
+    if os.path.isfile(ICON_PATH):
+        size = int(user32.GetSystemMetrics(SM_CXSMICON) or 16)
+        icon = user32.LoadImageW(None, ICON_PATH, IMAGE_ICON, size, size, LR_LOADFROMFILE)
+        if icon:
+            return int(icon), True
+        icon = user32.LoadImageW(
+            None, ICON_PATH, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE
+        )
+        if icon:
+            return int(icon), True
+    fallback = user32.LoadIconW(None, MAKEINTRESOURCE(IDI_APPLICATION))
+    return int(fallback or 0), False
+
+
+def close_legacy_ahk_script() -> None:
+    """关掉旧版单独托盘的 AutoHotkey 点击转发，避免出现第二个图标。"""
+    needle = "wallpaper_click_passthrough.ahk"
+    found: List[int] = []
+
+    def _enum(hwnd, _lparam):
+        title = _title(int(hwnd)).lower()
+        cls = _class_name(int(hwnd)).lower()
+        if needle in title and "autohotkey" in cls:
+            found.append(int(hwnd))
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(_enum), 0)
+    for hwnd in found:
+        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+    if found:
+        logging.info("已关闭旧版壁纸点击转发脚本 %s 个", len(found))
 
 
 def setup_logging() -> None:
@@ -931,18 +1002,134 @@ class PeekManager:
 
 
 # ---------------------------------------------------------------------------
+# Wallpaper Engine click passthrough
+# ---------------------------------------------------------------------------
+
+WALLPAPER_SKIP_CLASSES = {
+    "Progman",
+    "WorkerW",
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "NotifyIconOverflowWindow",
+}
+WALLPAPER_LAYER_CLASSES = {"WPEDesktopCEFWindow", "WPECloneView"}
+WALLPAPER_CLICK_CLASSES = ("Chrome_RenderWidgetHostHWND", "Chrome_WidgetWin_1")
+
+
+class WallpaperClickForwarder:
+    """最大化窗口客户区里的左键，复制一份给 Wallpaper Engine，不抢焦点。"""
+
+    def __init__(self) -> None:
+        self.press_hwnd = 0
+
+    def enabled(self) -> bool:
+        return bool(CFG.get("wallpaper_click_enabled", True))
+
+    def on_button_down(self, x: int, y: int) -> None:
+        self.press_hwnd = 0
+        if not self.enabled():
+            return
+        if not self._is_maximized_client_click(x, y):
+            return
+        target = self._find_wallpaper_target(x, y)
+        if not target:
+            return
+        self._post_mouse(target, WM_MOUSEMOVE, MK_LBUTTON, x, y)
+        self._post_mouse(target, WM_LBUTTONDOWN, MK_LBUTTON, x, y)
+        self.press_hwnd = target
+
+    def on_button_up(self, x: int, y: int) -> None:
+        hwnd = self.press_hwnd
+        self.press_hwnd = 0
+        if not hwnd or not user32.IsWindow(hwnd):
+            return
+        self._post_mouse(hwnd, WM_LBUTTONUP, 0, x, y)
+
+    def _is_maximized_client_click(self, x: int, y: int) -> bool:
+        hwnd = int(user32.WindowFromPoint(POINT(x, y)) or 0)
+        if not hwnd:
+            return False
+        root = int(user32.GetAncestor(hwnd, GA_ROOT) or hwnd)
+        cls = _class_name(root)
+        if cls in WALLPAPER_SKIP_CLASSES or cls.startswith("WPE"):
+            return False
+        if user32.IsIconic(root) or not user32.IsZoomed(root):
+            return False
+        lparam = (y & 0xFFFF) << 16 | (x & 0xFFFF)
+        hit = ctypes.c_size_t(0)
+        ok = user32.SendMessageTimeoutW(
+            root, WM_NCHITTEST, 0, lparam, SMTO_ABORTIFHUNG, 50, byref(hit)
+        )
+        return bool(ok) and int(hit.value) == HTCLIENT
+
+    def _find_wallpaper_target(self, x: int, y: int) -> int:
+        progman = int(user32.FindWindowW("Progman", None) or 0)
+        if not progman:
+            return 0
+        child = int(user32.GetWindow(progman, GW_CHILD) or 0)
+        while child:
+            if _class_name(child) == "WorkerW":
+                wpe = self._find_wpe_child_at(child, x, y)
+                if wpe:
+                    return self._pick_click_hwnd(wpe, x, y)
+            child = int(user32.GetWindow(child, GW_HWNDNEXT) or 0)
+        return 0
+
+    def _find_wpe_child_at(self, parent: int, x: int, y: int) -> int:
+        child = int(user32.GetWindow(parent, GW_CHILD) or 0)
+        while child:
+            if _class_name(child) in WALLPAPER_LAYER_CLASSES and self._point_in_window(child, x, y):
+                return child
+            child = int(user32.GetWindow(child, GW_HWNDNEXT) or 0)
+        return 0
+
+    def _pick_click_hwnd(self, root: int, x: int, y: int) -> int:
+        for cls in WALLPAPER_CLICK_CLASSES:
+            found = self._find_descendant_class_at(root, cls, x, y)
+            if found:
+                return found
+        return root
+
+    def _find_descendant_class_at(self, hwnd: int, want_class: str, x: int, y: int) -> int:
+        if _class_name(hwnd) == want_class and self._point_in_window(hwnd, x, y):
+            return hwnd
+        child = int(user32.GetWindow(hwnd, GW_CHILD) or 0)
+        while child:
+            found = self._find_descendant_class_at(child, want_class, x, y)
+            if found:
+                return found
+            child = int(user32.GetWindow(child, GW_HWNDNEXT) or 0)
+        return 0
+
+    def _point_in_window(self, hwnd: int, x: int, y: int) -> bool:
+        rc = RECT()
+        if not user32.GetWindowRect(hwnd, byref(rc)):
+            return False
+        return rc.left <= x < rc.right and rc.top <= y < rc.bottom
+
+    def _post_mouse(self, hwnd: int, msg: int, wparam: int, screen_x: int, screen_y: int) -> None:
+        pt = POINT(screen_x, screen_y)
+        user32.ScreenToClient(hwnd, byref(pt))
+        lparam = (pt.y & 0xFFFF) << 16 | (pt.x & 0xFFFF)
+        user32.PostMessageW(hwnd, msg, wparam, lparam)
+
+
+# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
 class WindowOpacityApp:
     def __init__(self) -> None:
         self.peek = PeekManager()
+        self.wallpaper = WallpaperClickForwarder()
         self.hwnd = HWND()
         self.osd_hwnd = HWND()
         self.osd_text = "不透明度 100%"
         self.hook = HHOOK()
         self.event_hooks: List[wintypes.HANDLE] = []
         self.nid = NOTIFYICONDATAW()
+        self.app_icon = HICON()
+        self._icon_owned = False
         self._mouse_proc = HOOKPROC(self._on_mouse)
         self._wnd_proc = WNDPROC(self._wndproc)
         self._osd_proc = WNDPROC(self._osd_wndproc)
@@ -952,6 +1139,7 @@ class WindowOpacityApp:
         self._mutex = wintypes.HANDLE()
 
     def run(self) -> int:
+        close_legacy_ahk_script()
         if not self._ensure_single_instance():
             return 0
         self._maybe_hide_console()
@@ -1005,13 +1193,15 @@ class WindowOpacityApp:
             user32.ShowWindow(console, SW_HIDE)
 
     def _register_classes(self) -> None:
+        self.app_icon, self._icon_owned = load_app_icon()
         hinst = kernel32.GetModuleHandleW(None)
         wc = WNDCLASSEXW()
         wc.cbSize = sizeof(WNDCLASSEXW)
         wc.style = CS_HREDRAW | CS_VREDRAW
         wc.lpfnWndProc = ctypes.cast(self._wnd_proc, ctypes.c_void_p)
         wc.hInstance = hinst
-        wc.hIcon = user32.LoadIconW(None, MAKEINTRESOURCE(IDI_APPLICATION))
+        wc.hIcon = self.app_icon
+        wc.hIconSm = self.app_icon
         wc.hCursor = user32.LoadCursorW(None, MAKEINTRESOURCE(32512))
         wc.hbrBackground = ctypes.c_void_p(COLOR_WINDOW + 1)
         wc.lpszClassName = self._class
@@ -1068,14 +1258,14 @@ class WindowOpacityApp:
         user32.SetLayeredWindowAttributes(self.osd_hwnd, 0, 230, LWA_ALPHA)
 
     def _add_tray(self) -> None:
-        icon = user32.LoadIconW(None, MAKEINTRESOURCE(IDI_APPLICATION))
+        icon = self.app_icon or user32.LoadIconW(None, MAKEINTRESOURCE(IDI_APPLICATION))
         self.nid.cbSize = sizeof(NOTIFYICONDATAW)
         self.nid.hWnd = self.hwnd
         self.nid.uID = 1
         self.nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         self.nid.uCallbackMessage = WM_TRAY
         self.nid.hIcon = icon
-        self.nid.szTip = "窗口透明度：Alt+滚轮调节"
+        self.nid.szTip = "窗口透明度：Alt+滚轮 / 透视桌面 / 壁纸点击"
         if not shell32.Shell_NotifyIconW(NIM_ADD, byref(self.nid)):
             logging.warning("托盘图标添加失败")
 
@@ -1103,12 +1293,19 @@ class WindowOpacityApp:
 
     def _on_mouse(self, nCode: int, wParam: int, lParam: int) -> int:
         try:
-            if nCode >= 0 and wParam == WM_MOUSEWHEEL:
-                if user32.GetAsyncKeyState(VK_MENU) & 0x8000:
+            if nCode >= 0:
+                if wParam == WM_MOUSEWHEEL:
+                    if user32.GetAsyncKeyState(VK_MENU) & 0x8000:
+                        info = ctypes.cast(lParam, POINTER(MSLLHOOKSTRUCT)).contents
+                        delta = ctypes.c_short((info.mouseData >> 16) & 0xFFFF).value
+                        self._adjust_foreground(1 if delta > 0 else -1)
+                        return 1
+                elif wParam == WM_LBUTTONDOWN:
                     info = ctypes.cast(lParam, POINTER(MSLLHOOKSTRUCT)).contents
-                    delta = ctypes.c_short((info.mouseData >> 16) & 0xFFFF).value
-                    self._adjust_foreground(1 if delta > 0 else -1)
-                    return 1
+                    self.wallpaper.on_button_down(int(info.pt.x), int(info.pt.y))
+                elif wParam == WM_LBUTTONUP:
+                    info = ctypes.cast(lParam, POINTER(MSLLHOOKSTRUCT)).contents
+                    self.wallpaper.on_button_up(int(info.pt.x), int(info.pt.y))
         except Exception:
             logging.exception("鼠标钩子异常")
         return user32.CallNextHookEx(self.hook, nCode, wParam, lParam)
@@ -1186,6 +1383,11 @@ class WindowOpacityApp:
                     else:
                         self.peek._prev_max = {}
                         self.peek.scan()
+                elif cmd == ID_TOGGLE_WALLPAPER_CLICK:
+                    CFG["wallpaper_click_enabled"] = not bool(
+                        CFG.get("wallpaper_click_enabled", True)
+                    )
+                    self._save_config()
                 elif cmd == ID_RESTART_ADMIN:
                     self._restart_elevated()
                 elif cmd == ID_EXIT:
@@ -1229,6 +1431,9 @@ class WindowOpacityApp:
         peek_on = bool(CFG.get("maximize_peek_enabled", True))
         flags = MF_STRING | (MF_CHECKED if peek_on else 0)
         user32.AppendMenuW(menu, flags, ID_TOGGLE_PEEK, "最大化透视桌面")
+        click_on = bool(CFG.get("wallpaper_click_enabled", True))
+        click_flags = MF_STRING | (MF_CHECKED if click_on else 0)
+        user32.AppendMenuW(menu, click_flags, ID_TOGGLE_WALLPAPER_CLICK, "壁纸点击转发")
         admin_flags = MF_STRING | (MF_GRAYED if is_admin() else 0)
         user32.AppendMenuW(menu, admin_flags, ID_RESTART_ADMIN, "以管理员身份运行")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
@@ -1247,6 +1452,7 @@ class WindowOpacityApp:
         except Exception:
             data = {}
         data["maximize_peek_enabled"] = bool(CFG.get("maximize_peek_enabled", True))
+        data["wallpaper_click_enabled"] = bool(CFG.get("wallpaper_click_enabled", True))
         with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
             fh.write("\n")
@@ -1263,6 +1469,10 @@ class WindowOpacityApp:
                 user32.UnhookWinEvent(hh)
             self.event_hooks.clear()
             shell32.Shell_NotifyIconW(NIM_DELETE, byref(self.nid))
+            if self._icon_owned and self.app_icon:
+                user32.DestroyIcon(self.app_icon)
+                self.app_icon = HICON()
+                self._icon_owned = False
             if self.osd_hwnd:
                 user32.DestroyWindow(self.osd_hwnd)
                 self.osd_hwnd = HWND()

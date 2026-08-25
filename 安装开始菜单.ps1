@@ -41,6 +41,11 @@ if ($pythonw) {
 $lnk.WorkingDirectory = $dir
 $lnk.WindowStyle = 7
 $lnk.Description = 'Alt+滚轮调节窗口透明度，最大化时透视桌面'
-$lnk.IconLocation = (Join-Path $env:SystemRoot 'System32\imageres.dll') + ',109'
+$ico = Join-Path $dir 'icons\window-opacity.ico'
+if (Test-Path -LiteralPath $ico) {
+    $lnk.IconLocation = $ico
+} else {
+    $lnk.IconLocation = (Join-Path $env:SystemRoot 'System32\imageres.dll') + ',109'
+}
 $lnk.Save()
 Write-Output $lnkPath
