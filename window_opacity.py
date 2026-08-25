@@ -819,6 +819,56 @@ class PeekManager:
             minimize_window(other)
         return others
 
+    def _foreground_root(self) -> int:
+        fg = int(user32.GetForegroundWindow() or 0)
+        if not fg:
+            return 0
+        return int(user32.GetAncestor(fg, GA_ROOT) or fg)
+
+    def _should_keep_others_minimized(self, monitor: int, keep_hwnd: int) -> bool:
+        """最上层窗口仍是这块屏幕上的最大化窗口时，才继续把其它窗口收起来。
+
+        从任务栏打开普通窗口 B 时，B 会抢到焦点，此时先不动 B；
+        再点回最大化的 A 后，B 应被重新最小化。
+        """
+        if not user32.IsWindow(keep_hwnd) or user32.IsIconic(keep_hwnd) or not user32.IsZoomed(keep_hwnd):
+            return False
+        fg_root = self._foreground_root()
+        if not fg_root:
+            return True
+        if fg_root == keep_hwnd:
+            return True
+        fg_monitor = int(user32.MonitorFromWindow(fg_root, MONITOR_DEFAULTTONEAREST) or 0)
+        if fg_monitor != monitor:
+            return True
+        if not is_manageable_window(fg_root):
+            return True
+        return False
+
+    def _merge_minimized(self, state: PeekState, newly: List[Tuple[int, WINDOWPLACEMENT]]) -> None:
+        if not newly:
+            return
+        index = {hwnd: i for i, (hwnd, _) in enumerate(state.others)}
+        for hwnd, pl in newly:
+            if hwnd in index:
+                state.others[index[hwnd]] = (hwnd, pl)
+            else:
+                index[hwnd] = len(state.others)
+                state.others.append((hwnd, pl))
+        logging.info(
+            "透视中重新最小化 %s",
+            ", ".join(_title(hwnd) or str(hwnd) for hwnd, _ in newly),
+        )
+
+    def _enforce_others_minimized(self, monitor: int, keep_hwnd: int) -> None:
+        state = self.states.get(monitor)
+        if state is None:
+            return
+        if not self._should_keep_others_minimized(monitor, keep_hwnd):
+            return
+        newly = self._collect_and_minimize_others(monitor, keep_hwnd)
+        self._merge_minimized(state, newly)
+
     def _pick_maximized(self) -> Dict[int, int]:
         by_monitor: Dict[int, List[int]] = {}
         fg = int(user32.GetForegroundWindow() or 0)
@@ -861,6 +911,7 @@ class PeekManager:
             current = self.states[monitor].maximized_hwnd
             target = maximized.get(monitor)
             if target == current:
+                self._enforce_others_minimized(monitor, current)
                 continue
             if target:
                 self.switch(monitor, target)
