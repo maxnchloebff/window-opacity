@@ -17,3 +17,12 @@ if (-not $exe) {
     exit 1
 }
 Start-Process -FilePath $exe -ArgumentList $argsList -WorkingDirectory $dir -WindowStyle Hidden
+
+$ahk = 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe'
+if (-not (Test-Path $ahk)) {
+    $ahk = 'C:\Program Files\AutoHotkey\v2\AutoHotkey.exe'
+}
+$ahkScript = Join-Path $dir 'wallpaper_click_passthrough.ahk'
+if ((Test-Path $ahk) -and (Test-Path $ahkScript)) {
+    Start-Process -FilePath $ahk -ArgumentList "`"$ahkScript`"" -WorkingDirectory $dir
+}
